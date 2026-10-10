@@ -1,0 +1,7 @@
+# Locally maintained TEST indicator list for DET-07.
+# Values here are documentation/test addresses (RFC 5737 TEST-NET) plus one lab
+# address you can enable for the demo. A match is a lead, NOT attribution.
+indicators:
+  - { value: "203.0.113.66", type: ip, label: "TEST-NET-3 sample indicator" }
+  - { value: "198.51.100.23", type: ip, label: "TEST-NET-2 sample indicator" }
+  - { value: "10.66.0.66", type: ip, label: "Lab 'known bad' sample address (used by the DET-07 sample scenario)" }

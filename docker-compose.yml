@@ -1,0 +1,191 @@
+# HLPA-DS - Honeypot Luring Prevention and Attack Detection System
+# Docker Compose stack for an isolated lab (Windows + Docker Desktop, Linux VM, or macOS).
+#
+# Network design (PRD section 5.4 trust zones):
+#   lab_net  (internal: true)  -> decoys + collector. NO route to the internet.
+#   app_net                    -> collector, api, db, controller, frontend.
+#   The decoys can reach ONLY the collector's shared log volume + lab_net; their
+#   default-deny egress is enforced by `internal: true` (no gateway out).
+#
+# The frontend (port 8080 on the host) is the only thing you browse to.
+# Decoy listener ports are published on 127.0.0.1 ONLY by default so nothing is
+# exposed to your wider network. Review ports before any non-local use.
+
+name: hlpa-ds
+
+x-restart: &restart
+  restart: unless-stopped
+
+networks:
+  lab_net:
+    internal: true          # <-- isolation: containers on this net have no outbound route
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.0.0/24   # matches config/decoys.json addresses and LAB_CIDR
+  app_net:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  cowrie_logs:
+  opencanary_logs:
+  http_logs:
+  cowrie_state:
+
+services:
+  # ------------------------------------------------------------------ database
+  mongo:
+    image: mongo:7.0
+    <<: *restart
+    networks: [app_net]
+    volumes:
+      - mongo_data:/data/db
+    # Not published to the host: only reachable from app_net.
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------------ decoys (isolated)
+  cowrie:
+    build: ./decoys/cowrie
+    container_name: hlpa-cowrie
+    <<: *restart
+    networks:
+      lab_net:
+        ipv4_address: 10.66.0.10
+    volumes:
+      - cowrie_logs:/cowrie/var/log/cowrie
+      - cowrie_state:/cowrie/var/lib/cowrie
+    ports:
+      - "127.0.0.1:${COWRIE_SSH_PORT:-2222}:22"
+      - "127.0.0.1:${COWRIE_TELNET_PORT:-2223}:23"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  opencanary:
+    build: ./decoys/opencanary
+    container_name: hlpa-opencanary
+    <<: *restart
+    networks:
+      lab_net:
+        ipv4_address: 10.66.0.11
+    volumes:
+      - opencanary_logs:/var/log/opencanary
+    ports:
+      - "127.0.0.1:${CANARY_FTP_PORT:-2121}:21"
+      - "127.0.0.1:${CANARY_MYSQL_PORT:-13306}:3306"
+      - "127.0.0.1:${CANARY_REDIS_PORT:-16379}:6379"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  http-decoy:
+    build: ./decoys/http-decoy
+    container_name: hlpa-http-decoy
+    <<: *restart
+    networks:
+      lab_net:
+        ipv4_address: 10.66.0.12
+    environment:
+      SENSOR_ID: decoy-web
+      LOG_FILE: /var/log/hlpa/http_decoy.json
+      REDACTION_KEY: ${REDACTION_KEY:?set REDACTION_KEY in .env}
+      HTTP_PORTS: "80"
+      EGRESS_TARGETS: "1.1.1.1:53,8.8.8.8:443,example.com:443,mongo:27017,api:4000"
+    volumes:
+      - http_logs:/var/log/hlpa
+    ports:
+      - "127.0.0.1:${HTTP_DECOY_PORT:-8888}:80"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # ------------------------------------------------------------------ collector / detection
+  collector:
+    build: ./collector
+    <<: *restart
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      app_net: {}
+      lab_net:
+        ipv4_address: 10.66.0.5   # collector on lab_net to health-probe decoys
+    environment:
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: hlpa
+      REDACTION_KEY: ${REDACTION_KEY:?set REDACTION_KEY in .env}
+      SOURCES: "cowrie=/logs/cowrie/cowrie.json,opencanary=/logs/opencanary/opencanary.log,http_decoy=/logs/http/http_decoy.json"
+      HEALTH_PROBE_SOURCE_IP: ""
+    volumes:
+      - cowrie_logs:/logs/cowrie:ro
+      - opencanary_logs:/logs/opencanary:ro
+      - http_logs:/logs/http:ro
+      - ./config/decoys.json:/app/config/decoys.json:ro
+
+  # ------------------------------------------------------------------ decoy controller (Docker access)
+  controller:
+    build: ./controller
+    <<: *restart
+    networks: [app_net]
+    environment:
+      CONTROLLER_TOKEN: ${CONTROLLER_TOKEN:?set CONTROLLER_TOKEN in .env}
+      ALLOWED_CONTAINERS: "hlpa-cowrie,hlpa-opencanary,hlpa-http-decoy"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # only this service touches Docker
+
+  # ------------------------------------------------------------------ API
+  api:
+    build: ./api
+    <<: *restart
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks: [app_net]
+    environment:
+      PORT: 4000
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: hlpa
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      ANALYST_USERNAME: ${ANALYST_USERNAME:-analyst}
+      ANALYST_PASSWORD: ${ANALYST_PASSWORD:-}
+      VIEWER_USERNAME: ${VIEWER_USERNAME:-viewer}
+      VIEWER_PASSWORD: ${VIEWER_PASSWORD:-}
+      LAB_CIDR: ${LAB_CIDR:-10.66.0.0/24}
+      CONTROLLER_URL: http://controller:9000
+      CONTROLLER_TOKEN: ${CONTROLLER_TOKEN}
+      DECOYS_FILE: /app/config/decoys.json
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    volumes:
+      - ./config/decoys.json:/app/config/decoys.json:ro
+
+  # ------------------------------------------------------------------ dashboard (browse here)
+  frontend:
+    build: ./frontend
+    <<: *restart
+    depends_on: [api]
+    networks: [app_net]
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+  # ------------------------------------------------------------------ sample replay (on demand)
+  # Not started by default. Run:  docker compose run --rm replay
+  replay:
+    build: ./collector
+    profiles: ["tools"]
+    networks: [app_net]
+    user: "0:0"          # needs to write into the sensor log volumes (owned by the decoy users)
+    entrypoint: ["python", "/samples/replay.py"]
+    environment:
+      COWRIE_LOG: /logs/cowrie/cowrie.json
+      OPENCANARY_LOG: /logs/opencanary/opencanary.log
+      HTTP_LOG: /logs/http/http_decoy.json
+      REDACTION_KEY: ${REDACTION_KEY:?set REDACTION_KEY in .env}
+    volumes:
+      - cowrie_logs:/logs/cowrie
+      - opencanary_logs:/logs/opencanary
+      - http_logs:/logs/http
+      - ./samples:/samples

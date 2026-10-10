@@ -1,0 +1,194 @@
+# HLPA-DS detection rule catalogue (PRD section 3.2).
+#
+# These rules are SEEDED into the database the first time the collector starts.
+# After that, administrators tune enabled/threshold/window/severity from the
+# dashboard (each change bumps the rule version and is audit-logged).
+# To re-seed from this file, delete the rule from the `rules` collection or run
+#   docker compose exec collector python -m hlpa_collector.main --reseed-rules
+#
+# Rule types:
+#   threshold  - count matching events for the same group within window_seconds
+#   distinct   - count DISTINCT values of distinct_field within the window
+#   match      - a single matching event is enough
+#   ioc        - event field matches the locally maintained indicator list
+#   post_response - the same source keeps interacting after an alert for it
+#                   was marked "Contained (lab only)"
+#
+# kind:
+#   attacker   - suppressed for approved test sources
+#   isolation / monitoring - never suppressed (they describe our own safety)
+
+taggers:
+  - field: command
+    normalize: lower
+    tags:
+      - tag: "cmd:discovery"
+        patterns: ['\buname\b', '\bwhoami\b', '(^|[;&| ])id($|[;&| ])', '/etc/passwd', '/etc/shadow', '\bifconfig\b', '\bip\s+(a|addr|route)\b',
+                   '(^|[;&| ])ps(\s|$)', '\bnetstat\b', '\blscpu\b', '/proc/cpuinfo', '\bhostname\b', '\bfree\s+-m\b', '\bcat\s+/etc/issue', '\blast\b', '\bhistory\b']
+      - tag: "cmd:download"
+        patterns: ['\bwget\b', '\bcurl\b', '\btftp\b', '\bscp\b', '\bftpget\b', '\bnc\b\s+\S+\s+\d+', '\bbusybox\s+(wget|tftp)']
+      - tag: "cmd:persistence"
+        patterns: ['crontab', 'authorized_keys', 'chmod\s+\+?[0-7]*x', 'chmod\s+777', '/etc/rc\.local', 'systemctl\s+enable', 'useradd', 'passwd\s']
+  - field: http_path
+    normalize: url
+    tags:
+      - tag: "web:probe"
+        patterns: ['/\.env', '/\.git', 'wp-admin', 'wp-login', 'xmlrpc\.php', 'phpmyadmin', '/admin', '/backup', '\.sql(\?|$)', '\.bak(\?|$)',
+                   '/etc/passwd', '\.\./', 'union\s+select', '<script', '/cgi-bin/', 'server-status', '/actuator', 'shell\.php', '/vendor/phpunit',
+                   '/config\.(php|json|yml)', '/\.aws', '/\.ssh', 'cmd=', 'exec=']
+
+rules:
+  - id: DET-01
+    name: Repeated failed authentication
+    version: 1
+    enabled: true
+    kind: attacker
+    type: threshold
+    severity: high
+    filter: { event_category: [auth_failure] }
+    group_by: [src_ip, decoy_id]
+    window_seconds: 60
+    threshold: 5
+    dedupe_seconds: 300
+    evidence_fields: [username, service, dst_port, credential_fp]
+    title: "Repeated failed logins from {src_ip} on {decoy_id}"
+    description: "5 or more failed authentications from one source against the same decoy within 60 seconds."
+
+  - id: DET-02
+    name: Multi-account / distributed guessing
+    version: 1
+    enabled: true
+    kind: attacker
+    type: distinct
+    severity: medium
+    escalate: { at: 8, severity: high }
+    filter: { event_category: [auth_failure] }
+    group_by: [decoy_id]
+    distinct_field: username
+    window_seconds: 120
+    threshold: 4
+    dedupe_seconds: 300
+    evidence_fields: [username, src_ip, service]
+    title: "Guessing across multiple accounts on {decoy_id}"
+    description: "Failed logins for 4 or more distinct usernames against one decoy within 120 seconds (from one or many sources)."
+
+  - id: DET-03
+    name: Service or port probing
+    version: 1
+    enabled: true
+    kind: attacker
+    type: distinct
+    severity: medium
+    filter: { event_category: [connection, banner_data, web_request, auth_failure] }
+    group_by: [src_ip]
+    distinct_field: dst_endpoint
+    window_seconds: 30
+    threshold: 11
+    dedupe_seconds: 300
+    evidence_fields: [dst_endpoint, service]
+    title: "Port / service probing from {src_ip}"
+    description: "One source touched more than 10 distinct decoy ports/services within 30 seconds (needs connection telemetry)."
+
+  - id: DET-04
+    name: Suspicious SSH session activity
+    version: 1
+    enabled: true
+    kind: attacker
+    type: match
+    severity: medium
+    severity_by_tag: { "cmd:discovery": medium, "cmd:download": high, "cmd:persistence": high }
+    filter: { event_category: [session_command], tags: ["cmd:discovery", "cmd:download", "cmd:persistence"] }
+    group_by: [session_id]
+    dedupe_seconds: 1800
+    evidence_fields: [command, username, service]
+    title: "Suspicious commands in emulated session from {src_ip}"
+    description: "An emulated (fake) shell session issued discovery-, download- or persistence-like commands. Commands ran only in Cowrie's emulation, never on a real host."
+
+  - id: DET-05
+    name: Web path probing
+    version: 1
+    enabled: true
+    kind: attacker
+    type: threshold
+    severity: medium
+    filter: { event_category: [web_request], tags: ["web:probe"] }
+    group_by: [src_ip, decoy_id]
+    window_seconds: 60
+    threshold: 3
+    dedupe_seconds: 300
+    evidence_fields: [http_path, http_status, user_agent]
+    title: "Web path probing from {src_ip}"
+    description: "Repeated requests for admin paths, sensitive-looking files or exploit-like URIs (case and URL-encoding normalised)."
+
+  - id: DET-06
+    name: High-frequency interaction
+    version: 1
+    enabled: true
+    kind: attacker
+    type: threshold
+    severity: low
+    escalate: { at: 200, severity: medium }
+    filter: { exclude: { event_category: [heartbeat, sensor_status, egress_attempt, health, session_meta, session_closed] } }
+    group_by: [src_ip]
+    window_seconds: 10
+    threshold: 60
+    dedupe_seconds: 300
+    evidence_fields: [service, event_category]
+    title: "High-frequency interaction from {src_ip}"
+    description: "A single source generated 60+ decoy events within 10 seconds."
+
+  - id: DET-07
+    name: Known indicator match
+    version: 1
+    enabled: true
+    kind: attacker
+    type: ioc
+    severity: high
+    ioc_fields: [src_ip, sha256]
+    group_by: [src_ip]
+    dedupe_seconds: 3600
+    evidence_fields: [service, event_category]
+    title: "Indicator match: {src_ip}"
+    description: "Observed address or payload hash is on the locally maintained test indicator list. A match is a lead, not attribution."
+
+  - id: DET-08
+    name: Unexpected outbound connection
+    version: 1
+    enabled: true
+    kind: isolation
+    type: match
+    severity: critical
+    filter: { event_category: [egress_attempt], outcome: [allowed] }
+    group_by: [decoy_id, egress_target]
+    dedupe_seconds: 3600
+    evidence_fields: [egress_target, message]
+    title: "ISOLATION BREACH: {decoy_id} reached {egress_target}"
+    description: "A decoy's egress self-test reached a destination outside its allowed set. Disable the decoy and re-check the network."
+
+  - id: DET-09
+    name: Sensor / configuration health failure
+    version: 1
+    enabled: true
+    kind: monitoring
+    type: match
+    severity: medium
+    filter: { event_category: [health], outcome: [failed] }
+    group_by: [decoy_id]
+    dedupe_seconds: 1800
+    evidence_fields: [message]
+    title: "Sensor health failure: {decoy_id}"
+    description: "A decoy stopped answering health checks or its log stopped updating. Monitoring alert - not attacker activity."
+
+  - id: DET-10
+    name: Repeated interaction after response
+    version: 1
+    enabled: true
+    kind: attacker
+    type: post_response
+    severity: medium
+    filter: { exclude: { event_category: [heartbeat, sensor_status, egress_attempt, health, session_meta, session_closed] } }
+    group_by: [src_ip]
+    dedupe_seconds: 1800
+    evidence_fields: [service, event_category]
+    title: "Source {src_ip} still active after lab containment"
+    description: "The same source keeps hitting decoys after an alert for it was marked 'Contained (lab only)'."

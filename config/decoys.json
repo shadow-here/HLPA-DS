@@ -1,0 +1,47 @@
+[
+  {
+    "_id": "decoy-ssh",
+    "name": "SSH/Telnet emulation (Cowrie)",
+    "type": "cowrie",
+    "source_type": "cowrie",
+    "container": "hlpa-cowrie",
+    "address": "10.66.0.10",
+    "ports": [22, 23],
+    "health_ports": [22, 23],
+    "network_zone": "Zone B - decoy network (hlpa_lab_net, internal)",
+    "hostname_lure": "srv-backup-02",
+    "purpose": "Observe SSH/Telnet login guessing and emulated shell behaviour",
+    "owner": "Security / infrastructure member",
+    "log_source": "cowrie.json (JSON lines)"
+  },
+  {
+    "_id": "decoy-canary",
+    "name": "Common-service canary (OpenCanary)",
+    "type": "opencanary",
+    "source_type": "opencanary",
+    "container": "hlpa-opencanary",
+    "address": "10.66.0.11",
+    "ports": [21, 1433, 3306, 5000, 6379, 9418],
+    "health_ports": [21, 3306, 6379],
+    "network_zone": "Zone B - decoy network (hlpa_lab_net, internal)",
+    "hostname_lure": "canary-svc-01",
+    "purpose": "Fake FTP, MySQL, MSSQL, Redis, VNC and Git services",
+    "owner": "Security / infrastructure member",
+    "log_source": "opencanary.log (JSON lines)"
+  },
+  {
+    "_id": "decoy-web",
+    "name": "HTTP admin console + banner listeners",
+    "type": "http_decoy",
+    "source_type": "http_decoy",
+    "container": "hlpa-http-decoy",
+    "address": "10.66.0.12",
+    "ports": [80, 25, 53, 110, 135, 139, 143, 445, 3389, 5432, 5900, 8080, 8443, 9200, 11211],
+    "health_ports": [80, 445, 3389],
+    "network_zone": "Zone B - decoy network (hlpa_lab_net, internal)",
+    "hostname_lure": "NX-2200 Edge Router console",
+    "purpose": "Synthetic web login page and fake service banners (port-probe telemetry, egress self-test)",
+    "owner": "Security / infrastructure member",
+    "log_source": "http_decoy.json (JSON lines)"
+  }
+]

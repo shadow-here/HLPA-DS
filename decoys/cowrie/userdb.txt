@@ -1,0 +1,11 @@
+# HLPA-DS synthetic credential DB for the Cowrie EMULATED shell.
+# Format: username:x:password   ('!' = deny, '*' = any)
+# These are fake lab accounts - never put real credentials here.
+root:x:!root
+root:x:!123456
+root:x:!password
+root:x:!toor
+root:x:*
+ubuntu:x:!ubuntu
+ubuntu:x:*
+backup:x:*
